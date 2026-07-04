@@ -16,7 +16,9 @@ Personal setup for the Pi coding agent: extensions, skills, and themes kept in o
 - `ask-user.ts` — adds a multiple-choice `ask_user` tool.
 - `border-editor.ts` — custom editor border/status UI.
 - `flow-title.ts` — custom startup/title screen.
+- `feature-loop/` — starts GitHub issue feature and PR review loops.
 - `github-issue-autocomplete.ts` — autocompletes GitHub issue references with `#...`.
+- `goal-mode/` — persistent `/goal` loop with budget, guided setup, and auto-child delegation.
 - `openai-codex-fast-mode.ts` — sets OpenAI Codex requests to priority service tier.
 - `todo.ts` — adds session-scoped todo tools and UI.
 - `truncated-tools.ts` — adds truncation-safe `rg` search.
