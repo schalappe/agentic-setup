@@ -20,6 +20,7 @@ Personal setup for the Pi coding agent: extensions, skills, and themes kept in o
 - `github-issue-autocomplete.ts` — autocompletes GitHub issue references with `#...`.
 - `goal-mode/` — persistent `/goal` loop with budget, guided setup, and auto-child delegation.
 - `openai-codex-fast-mode.ts` — sets OpenAI Codex requests to priority service tier.
+- `sound-notification.ts` — plays a sound when the agent finishes.
 - `todo.ts` — adds session-scoped todo tools and UI.
 - `truncated-tools.ts` — adds truncation-safe `rg` search.
 - `web-tools/` — adds `webfetch` and `websearch`; see `extensions/web-tools/README.md`.
