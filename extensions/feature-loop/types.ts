@@ -65,6 +65,8 @@ export interface ChildRun {
   stopReason?: string;
 }
 
+export type CiStatus = "none" | "pending" | "green" | "red" | "unknown";
+
 export interface QualityCycle {
   index: number;
   status: StepStatus;
@@ -74,7 +76,7 @@ export interface QualityCycle {
   ponytailFindingCount?: number;
   beforeFixSha?: string;
   afterFixSha?: string;
-  ciStatus?: "pending" | "green" | "red" | "unknown";
+  ciStatus?: CiStatus;
   stopReason?: string;
 }
 

@@ -3,7 +3,7 @@
  * GitHub CLI wrappers. `gh` is source of truth.
  */
 
-import type { GitHubIssue } from "./types.ts";
+import type { CiStatus, GitHubIssue } from "./types.ts";
 import { execFile, type ExecResult } from "./shell.ts";
 
 interface GhIssueJson {
@@ -108,13 +108,12 @@ export function parseTaskListIssueRefs(body: string): number[] {
   const refs: number[] = [];
   const seen = new Set<number>();
   for (const line of body.split("\n")) {
-    if (!/^\s*- \[[ xX-]\]/.test(line)) continue;
-    for (const match of line.matchAll(/#(\d+)/g)) {
-      const number = Number(match[1]);
-      if (seen.has(number)) continue;
-      seen.add(number);
-      refs.push(number);
-    }
+    const item = line.match(/^\s*- \[[ xX-]\]\s+(?:(?:https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/issues\/)|(?:[\w.-]+\/[\w.-]+#)|#)(\d+)\b/);
+    if (!item) continue;
+    const number = Number(item[1]);
+    if (seen.has(number)) continue;
+    seen.add(number);
+    refs.push(number);
   }
   return refs;
 }
@@ -177,17 +176,16 @@ export async function createPr(
  * @param result - gh pr checks exec result.
  * @returns CI status.
  */
-export function classifyPrChecks(
-  result: ExecResult,
-): "pending" | "green" | "red" | "unknown" {
+export function classifyPrChecks(result: ExecResult): CiStatus {
   let checks: Array<{ state?: string }>;
   try {
     checks = JSON.parse(result.stdout) as Array<{ state?: string }>;
   } catch {
+    if (result.stderr.includes("no checks reported")) return "none";
     return result.code === 8 ? "pending" : "unknown";
   }
   if (!Array.isArray(checks)) return "unknown";
-  if (checks.length === 0) return "green";
+  if (checks.length === 0) return "none";
   if (
     checks.some(
       (check) =>
@@ -215,7 +213,7 @@ export function classifyPrChecks(
 export async function checkPrCi(
   cwd: string,
   prUrl: string,
-): Promise<"pending" | "green" | "red" | "unknown"> {
+): Promise<CiStatus> {
   const result: ExecResult = await execFile(
     "gh",
     ["pr", "checks", prUrl, "--json", "state"],
@@ -235,7 +233,7 @@ export async function waitPrCi(
   cwd: string,
   prUrl: string,
   timeoutMs = 30 * 60 * 1000,
-): Promise<"pending" | "green" | "red" | "unknown"> {
+): Promise<CiStatus> {
   const end = Date.now() + timeoutMs;
   let status = await checkPrCi(cwd, prUrl);
   while (status === "pending" && Date.now() < end) {

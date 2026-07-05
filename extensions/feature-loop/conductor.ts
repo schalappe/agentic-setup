@@ -564,8 +564,10 @@ export class FeatureLoopConductor {
           "thermo clean",
         );
         cycle.ciStatus = await waitPrCi(review.worktree, review.prUrl);
-        cycle.status = cycle.ciStatus === "green" ? "done" : "blocked";
-        review.status = cycle.status === "done" ? "done" : "blocked";
+        const ciSatisfied =
+          cycle.ciStatus === "green" || cycle.ciStatus === "none";
+        cycle.status = ciSatisfied ? "done" : "blocked";
+        review.status = ciSatisfied ? "done" : "blocked";
         review.stopReason =
           cycle.ciStatus === "red"
             ? "CI red"

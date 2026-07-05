@@ -8,7 +8,7 @@ import path from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { featureLoopRoot, runDir as makeRunDir } from "./paths.ts";
 import { readState } from "./state.ts";
-import { hasUnpushedCommits, isDirty, removeWorktree } from "./git.ts";
+import { isDirty, removeWorktree } from "./git.ts";
 import { isPidAlive } from "./shell.ts";
 import type { FeatureLoopState } from "./types.ts";
 
@@ -54,6 +54,8 @@ export async function cleanRuns(
     return;
   }
 
+  let deleted = 0;
+  let refused = 0;
   for (const dir of dirs) {
     let state: FeatureLoopState | undefined;
     try {
@@ -64,6 +66,7 @@ export async function cleanRuns(
     if (state) {
       const refusal = await cleanupRefusal(state, options);
       if (refusal) {
+        refused += 1;
         ctx.ui.notify(`Refusing ${path.basename(dir)}: ${refusal}`, "warning");
         continue;
       }
@@ -79,8 +82,11 @@ export async function cleanRuns(
       for (const worktree of collectWorktrees(state))
         await removeWorktree(cwd, worktree);
     await rm(dir, { recursive: true, force: true });
+    deleted += 1;
     ctx.ui.notify(`Deleted ${dir}`, "info");
   }
+  if (deleted === 0 && refused > 0)
+    ctx.ui.notify("No runs deleted; rerun with --force to discard dirty worktrees", "warning");
 }
 
 async function targetRunDirs(
@@ -138,8 +144,6 @@ async function cleanupRefusal(
   for (const worktree of collectWorktrees(state)) {
     if (!options.force && (await isDirty(worktree)))
       return `dirty worktree ${worktree}`;
-    if (!options.force && (await hasUnpushedCommits(worktree)))
-      return `unpushed commits ${worktree}`;
   }
   return undefined;
 }

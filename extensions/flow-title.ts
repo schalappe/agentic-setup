@@ -2,7 +2,7 @@ import path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 type HeaderTheme = {
   fg(color: "accent" | "muted", text: string): string;

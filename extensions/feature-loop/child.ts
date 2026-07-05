@@ -22,6 +22,7 @@ const RESULT_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 const RECOVERY_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_STREAM_TEXT_CHARS = 256_000;
 
 // Linux caps one argv entry at 128 KiB; larger prompts go through @file.
 const MAX_INLINE_PROMPT_BYTES = 60_000;
@@ -35,6 +36,18 @@ interface ChildInput {
   timeoutMs?: number;
   noOutputTimeoutMs?: number;
   onWorker?: (worker: WorkerRef) => Promise<void>;
+}
+
+interface PiSpawnResult {
+  worker: WorkerRef;
+  output: SpawnLogResult;
+  result?: ChildResult;
+  finalText: string;
+}
+
+interface AssistantTextEvent {
+  mode: "append" | "replace";
+  text: string;
 }
 
 /**
@@ -70,26 +83,109 @@ function resultChunks(text: string): string[] {
 export function extractAssistantText(text: string): string {
   let last = "";
   for (const line of text.split("\n")) {
-    try {
-      const event = JSON.parse(line) as {
-        type?: string;
-        message?: {
-          role?: string;
-          content?: Array<{ type?: string; text?: string }>;
-        };
-      };
-      if (event.type !== "message_end" || event.message?.role !== "assistant")
-        continue;
-      const decoded = event.message.content
-        ?.filter((part) => part.type === "text")
-        .map((part) => part.text ?? "")
-        .join("\n");
-      if (decoded) last = decoded;
-    } catch {
-      // Plain text line.
-    }
+    const event = assistantTextEvent(line);
+    if (!event) continue;
+    last =
+      event.mode === "replace"
+        ? event.text
+        : appendTextTail(last, event.text, MAX_STREAM_TEXT_CHARS);
   }
   return last;
+}
+
+function appendTextTail(current: string, text: string, maxChars: number): string {
+  const next = current + text;
+  return next.length > maxChars ? next.slice(-maxChars) : next;
+}
+
+function decodeJsonString(raw: string): string {
+  try {
+    return JSON.parse(`"${raw}"`) as string;
+  } catch {
+    return "";
+  }
+}
+
+function assistantTextEvent(line: string): AssistantTextEvent | undefined {
+  const delta = line.match(
+    /"assistantMessageEvent":\{"type":"text_delta"[\s\S]*?"delta":"((?:\\.|[^"\\])*)"/,
+  );
+  if (delta?.[1]) return { mode: "append", text: decodeJsonString(delta[1]) };
+
+  if (
+    !line.includes('"type":"message_end"') ||
+    !line.includes('"role":"assistant"')
+  )
+    return undefined;
+
+  try {
+    const event = JSON.parse(line) as {
+      type?: string;
+      message?: {
+        role?: string;
+        content?: Array<{ type?: string; text?: string }>;
+      };
+    };
+    if (event.type !== "message_end" || event.message?.role !== "assistant")
+      return undefined;
+    const text = event.message.content
+      ?.filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("\n");
+    return text ? { mode: "replace", text } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function createPiOutputCollector(): {
+  onStdout: (text: string) => void;
+  finish: () => void;
+  readonly result: ChildResult | undefined;
+  readonly finalText: string;
+} {
+  let pending = "";
+  let finalText = "";
+  let result: ChildResult | undefined;
+
+  const applyText = (event: AssistantTextEvent) => {
+    finalText =
+      event.mode === "replace"
+        ? event.text.slice(-MAX_STREAM_TEXT_CHARS)
+        : appendTextTail(finalText, event.text, MAX_STREAM_TEXT_CHARS);
+    result = parseChildResult(finalText) ?? result;
+  };
+
+  const scanLine = (line: string) => {
+    const parsed = parseChildResult(line);
+    if (parsed) result = parsed;
+
+    const event = assistantTextEvent(line);
+    if (event) applyText(event);
+    else if (!line.startsWith("{"))
+      applyText({ mode: "append", text: `${line}\n` });
+  };
+
+  const onStdout = (text: string) => {
+    pending += text;
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) scanLine(line);
+  };
+
+  return {
+    onStdout,
+    finish: () => {
+      if (pending) scanLine(pending);
+      pending = "";
+    },
+    get result() {
+      return result;
+    },
+    get finalText() {
+      return finalText;
+    },
+  };
 }
 
 /**
@@ -107,7 +203,7 @@ export function promptArg(prompt: string, promptPath: string): string {
 async function spawnPi(
   input: ChildInput,
   defaultTimeoutMs: number,
-): Promise<{ worker: WorkerRef; output: SpawnLogResult }> {
+): Promise<PiSpawnResult> {
   await mkdir(path.join(input.runDir, "logs"), { recursive: true });
   await mkdir(path.join(input.runDir, "prompts"), { recursive: true });
   const promptPath = path.join(input.runDir, "prompts", `${input.name}.md`);
@@ -124,6 +220,7 @@ async function spawnPi(
     startedAt: new Date().toISOString(),
   };
 
+  const collector = createPiOutputCollector();
   const output = await spawnLogged(
     "pi",
     [
@@ -138,16 +235,23 @@ async function spawnPi(
       logPath,
       timeoutMs: input.timeoutMs ?? defaultTimeoutMs,
       noOutputTimeoutMs: input.noOutputTimeoutMs ?? 120_000,
+      onStdout: collector.onStdout,
       onPid: async (pid) => {
         worker.pid = pid;
         await input.onWorker?.({ ...worker });
       },
     },
   );
+  collector.finish();
 
   worker.endedAt = new Date().toISOString();
   worker.exitCode = output.code;
-  return { worker, output };
+  return {
+    worker,
+    output,
+    result: collector.result,
+    finalText: collector.finalText,
+  };
 }
 
 /**
@@ -158,10 +262,11 @@ async function spawnPi(
 export async function runPiChild(
   input: ChildInput,
 ): Promise<{ worker: WorkerRef; result: ChildResult }> {
-  const { worker, output } = await spawnPi(input, 60 * 60 * 1000);
-  const result = await resolveChildResult(input, output);
+  const spawned = await spawnPi(input, 60 * 60 * 1000);
+  const { worker } = spawned;
+  const result = await resolveChildResult(input, spawned);
   worker.status =
-    output.code === 0 && result.status !== "failed" ? "done" : "failed";
+    spawned.output.code === 0 && result.status !== "failed" ? "done" : "failed";
   worker.summary = result.summary;
   worker.stopReason = result.stopReason;
   return { worker, result };
@@ -169,18 +274,23 @@ export async function runPiChild(
 
 async function resolveChildResult(
   input: ChildInput,
-  output: SpawnLogResult,
+  spawned: PiSpawnResult,
 ): Promise<ChildResult> {
+  const { output } = spawned;
   if (output.code === 125)
     return {
       status: "blocked",
       stopReason: "child produced no output before watchdog",
     };
-  const parsed = parseChildResult(`${output.stdout}\n${output.stderr}`);
+  const parsed =
+    spawned.result ?? parseChildResult(`${output.stdout}\n${output.stderr}`);
   if (parsed) return parsed;
   const recovered =
     output.code === 0
-      ? await recoverResult(input, extractAssistantText(output.stdout))
+      ? await recoverResult(
+          input,
+          spawned.finalText || extractAssistantText(output.stdout),
+        )
       : undefined;
   return (
     recovered ?? {
@@ -199,7 +309,7 @@ async function recoverResult(
   finalMessage: string,
 ): Promise<ChildResult | undefined> {
   if (!finalMessage.trim()) return undefined;
-  const { output } = await spawnPi(
+  const spawned = await spawnPi(
     {
       ...input,
       name: `${input.name}-result`,
@@ -208,8 +318,11 @@ async function recoverResult(
     },
     RECOVERY_TIMEOUT_MS,
   );
-  if (output.code !== 0) return undefined;
-  return parseChildResult(`${output.stdout}\n${output.stderr}`);
+  if (spawned.output.code !== 0) return undefined;
+  return (
+    spawned.result ??
+    parseChildResult(`${spawned.output.stdout}\n${spawned.output.stderr}`)
+  );
 }
 
 /**
@@ -220,9 +333,11 @@ async function recoverResult(
 export async function runPiText(
   input: ChildInput,
 ): Promise<{ worker: WorkerRef; text: string }> {
-  const { worker, output } = await spawnPi(input, 20 * 60 * 1000);
+  const spawned = await spawnPi(input, 20 * 60 * 1000);
+  const { worker, output } = spawned;
   worker.status = output.code === 0 ? "done" : "failed";
   const text =
+    spawned.finalText ||
     extractAssistantText(output.stdout) ||
     output.stdout.trim() ||
     output.stderr.trim();

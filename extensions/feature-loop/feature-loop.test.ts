@@ -5,7 +5,7 @@ import { expect, test } from "bun:test";
 import { extractAssistantText, parseChildResult, promptArg } from "./child.ts";
 import { ensureWorktree } from "./git.ts";
 import { execFile, spawnLogged } from "./shell.ts";
-import { parseCleanArgs } from "./cleanup.ts";
+import { cleanRuns, parseCleanArgs } from "./cleanup.ts";
 import { parseIssueNumber, parseResumeArgs, parseStartArgs } from "./args.ts";
 import {
   detectThermoFallback,
@@ -72,6 +72,20 @@ test("extract final assistant text from Pi JSONL", () => {
   expect(extractAssistantText(line)).toBe(
     "https://github.com/acme/repo/pull/42",
   );
+});
+
+test("extract assistant text from streamed Pi deltas", () => {
+  const lines = ["hello ", "world"].map((delta) =>
+    JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        delta,
+        partial: { ignored: "x".repeat(1000) },
+      },
+    }),
+  );
+  expect(extractAssistantText(lines.join("\n"))).toBe("hello world");
 });
 
 test("parse child result from Pi JSONL assistant message", () => {
@@ -206,9 +220,9 @@ test("parse GitHub sub-issues", () => {
 test("parse task-list issue refs as fallback", () => {
   expect(
     parseTaskListIssueRefs(
-      "- [ ] #376 one\n- [x] done #377\nplain #999\n- [ ] duplicate #376",
+      "- [ ] #376 one\n- [x] owner/repo#377 done\n- [ ] https://github.com/o/r/issues/378\nplain #999\n- [ ] duplicate #376\n- [ ] All accounts referenced by issue #8 mappings exist",
     ),
-  ).toEqual([376, 377]);
+  ).toEqual([376, 377, 378]);
 });
 
 test("parse clean args", () => {
@@ -224,6 +238,56 @@ test("parse clean args", () => {
     force: false,
     kill: false,
   });
+});
+
+test("clean removes unpushed worktree without deleting branch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "feature-loop-clean-"));
+  const repo = join(dir, "repo");
+  const worktree = join(repo, ".pi", "feature-loop", "run-9", "worktrees", "feature-9");
+  const run = runDir(repo, 9);
+  await execFile("git", ["init", repo], { cwd: dir });
+  await execFile("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  await execFile("git", ["config", "user.name", "Test"], { cwd: repo });
+  await writeFile(join(repo, "README.md"), "x\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repo });
+  await execFile("git", ["commit", "-m", "init"], { cwd: repo });
+  await ensureWorktree(repo, worktree, "feature/9-t-aaaaaaaa", "HEAD");
+  await writeFile(join(worktree, "feature.txt"), "x\n", "utf8");
+  await execFile("git", ["add", "feature.txt"], { cwd: worktree });
+  await execFile("git", ["commit", "-m", "feature"], { cwd: worktree });
+
+  const now = new Date().toISOString();
+  await writeState({
+    version: 1,
+    issue: { number: 9, title: "t" },
+    baseBranch: "develop",
+    featureBranch: "feature/9-t-aaaaaaaa",
+    featureWorktree: worktree,
+    runDir: run,
+    status: "done",
+    mode: "direct",
+    maxCycles: 10,
+    children: [],
+    paused: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const notices: string[] = [];
+  await cleanRuns(repo, "#9", {
+    ui: {
+      confirm: async () => true,
+      notify: (message: string) => notices.push(message),
+    },
+  } as never);
+
+  await expect(readState(run)).rejects.toThrow();
+  const branch = await execFile(
+    "git",
+    ["show-ref", "--verify", "refs/heads/feature/9-t-aaaaaaaa"],
+    { cwd: repo },
+  );
+  expect(branch.code).toBe(0);
+  expect(notices.join("\n")).not.toContain("unpushed commits");
 });
 
 test("slugify branch text", () => {
@@ -277,6 +341,27 @@ test("silent child gets watchdog log", async () => {
   expect(await readFile(logPath, "utf8")).toContain("no output");
 });
 
+test("spawnLogged keeps bounded output tail", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "feature-loop-test-"));
+  const logPath = join(dir, "child.log");
+  const result = await spawnLogged(
+    process.execPath,
+    [
+      "-e",
+      'process.stdout.write("x".repeat(5000)); process.stdout.write("FEATURE_LOOP_RESULT: {\\"status\\":\\"clean\\",\\"findingCount\\":0}")',
+    ],
+    {
+      cwd: dir,
+      logPath,
+      maxOutputChars: 128,
+    },
+  );
+  expect(result.code).toBe(0);
+  expect(result.stdout.length).toBeLessThanOrEqual(128);
+  expect(result.stdout).toContain("FEATURE_LOOP_RESULT");
+  expect((await readFile(logPath, "utf8")).length).toBeGreaterThan(5000);
+});
+
 test("classify PR checks parses stdout despite nonzero gh exit codes", () => {
   expect(
     classifyPrChecks({
@@ -300,13 +385,16 @@ test("classify PR checks parses stdout despite nonzero gh exit codes", () => {
       stderr: "",
     }),
   ).toBe("green");
-  expect(classifyPrChecks({ code: 0, stdout: "[]", stderr: "" })).toBe("green");
+  expect(classifyPrChecks({ code: 0, stdout: "[]", stderr: "" })).toBe("none");
   expect(
     classifyPrChecks({
       code: 1,
       stdout: "garbage",
       stderr: "no checks reported",
     }),
+  ).toBe("none");
+  expect(
+    classifyPrChecks({ code: 1, stdout: "garbage", stderr: "gh failed" }),
   ).toBe("unknown");
 });
 

@@ -17,6 +17,13 @@ export interface SpawnLogResult extends ExecResult {
 	pid?: number;
 }
 
+const DEFAULT_MAX_OUTPUT_CHARS = 256_000;
+
+function appendTail(current: string, text: string, maxChars: number): string {
+	const next = current + text;
+	return next.length > maxChars ? next.slice(-maxChars) : next;
+}
+
 /**
  * Run command and capture output.
  * @param command - Binary.
@@ -77,8 +84,11 @@ export async function spawnLogged(
 		logPath: string;
 		timeoutMs?: number;
 		noOutputTimeoutMs?: number;
+		maxOutputChars?: number;
 		signal?: AbortSignal;
 		onPid?: (pid: number) => void;
+		onStdout?: (text: string) => void;
+		onStderr?: (text: string) => void;
 	},
 ): Promise<SpawnLogResult> {
 	await mkdir(path.dirname(options.logPath), { recursive: true });
@@ -91,24 +101,44 @@ export async function spawnLogged(
 		let stderr = "";
 		let done = false;
 		let sawOutput = false;
+		let logWrite: Promise<void> = Promise.resolve();
+		const maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+		const appendLog = (text: string) => {
+			logWrite = logWrite
+				.catch(() => undefined)
+				.then(() => appendFile(options.logPath, text, "utf8"));
+		};
 		const write = (stream: "stdout" | "stderr", data: Buffer) => {
 			sawOutput = true;
 			if (noOutputTimer) clearTimeout(noOutputTimer);
 			const text = data.toString();
-			if (stream === "stdout") stdout += text;
-			else stderr += text;
-			void appendFile(options.logPath, text, "utf8");
+			if (stream === "stdout") {
+				stdout = appendTail(stdout, text, maxOutputChars);
+				options.onStdout?.(text);
+			} else {
+				stderr = appendTail(stderr, text, maxOutputChars);
+				options.onStderr?.(text);
+			}
+			appendLog(text);
 		};
 		const finish = (code: number) => {
 			if (done) return;
 			done = true;
 			if (timer) clearTimeout(timer);
 			if (noOutputTimer) clearTimeout(noOutputTimer);
-			resolve({ code, stdout, stderr, pid: child.pid });
+			void logWrite
+				.catch((error: unknown) => {
+					stderr = appendTail(
+						stderr,
+						error instanceof Error ? error.message : String(error),
+						maxOutputChars,
+					);
+				})
+				.then(() => resolve({ code, stdout, stderr, pid: child.pid }));
 		};
 		const timer = options.timeoutMs
 			? setTimeout(() => {
-				void appendFile(options.logPath, `\n[feature-loop] timeout after ${options.timeoutMs}ms\n`, "utf8");
+				appendLog(`\n[feature-loop] timeout after ${options.timeoutMs}ms\n`);
 				child.kill("SIGTERM");
 				setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
 				finish(124);
@@ -117,7 +147,7 @@ export async function spawnLogged(
 		const noOutputTimer = options.noOutputTimeoutMs
 			? setTimeout(() => {
 				if (sawOutput) return;
-				void appendFile(options.logPath, `\n[feature-loop] no output after ${options.noOutputTimeoutMs}ms\n`, "utf8");
+				appendLog(`\n[feature-loop] no output after ${options.noOutputTimeoutMs}ms\n`);
 				child.kill("SIGTERM");
 				setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
 				finish(125);
@@ -128,8 +158,9 @@ export async function spawnLogged(
 		child.stderr.on("data", (data) => write("stderr", data));
 		child.on("close", (code) => finish(code ?? 0));
 		child.on("error", (error) => {
-			stderr += error.message;
-			void appendFile(options.logPath, error.message, "utf8");
+			stderr = appendTail(stderr, error.message, maxOutputChars);
+			options.onStderr?.(error.message);
+			appendLog(error.message);
 			finish(1);
 		});
 		options.signal?.addEventListener("abort", () => {
