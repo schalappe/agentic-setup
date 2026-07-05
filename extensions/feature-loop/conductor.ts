@@ -149,10 +149,6 @@ function normalizeFindingText(text: string): string {
     .trim();
 }
 
-function isDoneReview(review: PRQualityRun): boolean {
-  return review.status === "done";
-}
-
 /**
  * Long-lived conductor. Children do actual work.
  */
@@ -305,14 +301,7 @@ export class FeatureLoopConductor {
       for (const child of state.children) {
         await this.waitIfPaused();
         if (this.stopped) return this.markStopped("stopped by user");
-        if (child.status !== "clean") {
-          if (
-            child.review &&
-            (child.status === "reviewing" || child.status === "blocked")
-          )
-            await this.resumeChildReview(child);
-          else await this.implementChild(child);
-        }
+        if (child.status !== "clean") await this.implementChild(child);
         if (child.status !== "clean")
           return this.block(
             `child #${child.issue.number}: ${child.stopReason ?? child.status}`,
@@ -327,7 +316,8 @@ export class FeatureLoopConductor {
         await deleteMergedBranch(this.cwd, child.branch, child.worktree);
         await this.save(`deleted ${child.branch}`);
       }
-    } else {
+    } else if (!state.implemented && !state.finalPrUrl) {
+      // [>]: Resume skips finished direct implementation; old state files use finalPrUrl.
       await this.implementDirect();
       if (state.status !== "running") return;
     }
@@ -359,43 +349,53 @@ export class FeatureLoopConductor {
 
   private async implementChild(child: ChildRun): Promise<void> {
     const state = this.mustState();
-    child.status = "implementing";
     await ensureWorktree(
       this.cwd,
       child.worktree,
       child.branch,
       state.featureBranch,
     );
-    await this.save(`implement child #${child.issue.number}`);
-    const { worker, result } = await this.childWorker(
-      "implement",
-      `child-${child.issue.number}-implement`,
-      child.worktree,
-      implementationPrompt(child.issue, state.featureBranch),
-    );
-    child.worker = worker;
-    if (result.status === "blocked" || result.status === "failed") {
-      child.status = result.status;
-      child.stopReason = result.stopReason ?? result.summary;
-      await this.save(`child #${child.issue.number} ${child.status}`);
-      return;
-    }
+    // [>]: Resume continues at the first unfinished stage; prUrl marks implementation done.
+    if (!child.prUrl) {
+      child.status = "implementing";
+      child.stopReason = undefined;
+      await this.save(`implement child #${child.issue.number}`);
+      const { worker, result } = await this.childWorker(
+        "implement",
+        `child-${child.issue.number}-implement`,
+        child.worktree,
+        implementationPrompt(child.issue, state.featureBranch),
+      );
+      child.worker = worker;
+      if (result.status === "blocked" || result.status === "failed") {
+        child.status = result.status;
+        child.stopReason = result.stopReason ?? result.summary;
+        await this.save(`child #${child.issue.number} ${child.status}`);
+        return;
+      }
 
-    await pushBranch(child.worktree, child.branch);
-    child.status = "pr";
-    child.prUrl = await this.openPrWithPi(
-      child.worktree,
-      state.featureBranch,
-      child.issue.number,
-      `child-${child.issue.number}-pr`,
-    );
-    await this.save(`child PR opened ${child.prUrl}`);
+      await pushBranch(child.worktree, child.branch);
+      child.status = "pr";
+      child.prUrl = await this.openPrWithPi(
+        child.worktree,
+        state.featureBranch,
+        child.issue.number,
+        `child-${child.issue.number}-pr`,
+      );
+      await this.save(`child PR opened ${child.prUrl}`);
+    }
     child.status = "reviewing";
-    child.review = this.newQualityRun(
+    child.stopReason = undefined;
+    child.review ??= this.newQualityRun(
       child.prUrl,
       state.featureBranch,
       child.worktree,
     );
+    if (child.review.status !== "done") {
+      child.review.status = "running";
+      child.review.stopReason = undefined;
+      child.review.endedAt = undefined;
+    }
     await this.runQuality(child.review);
     child.status = child.review.status === "done" ? "clean" : "blocked";
     child.stopReason = child.review.stopReason;
@@ -411,27 +411,14 @@ export class FeatureLoopConductor {
       implementationPrompt(state.issue, state.baseBranch),
     );
     state.activeWorker = worker;
-    if (result.status === "blocked" || result.status === "failed")
+    if (result.status === "blocked" || result.status === "failed") {
       await this.block(
         result.stopReason ?? result.summary ?? "direct implementation failed",
       );
-  }
-
-  private async resumeChildReview(child: ChildRun): Promise<void> {
-    if (!child.review)
-      throw new Error(`child #${child.issue.number} has no review to resume`);
-    if (child.review.status !== "done") {
-      child.status = "reviewing";
-      child.stopReason = undefined;
-      child.review.status = "running";
-      child.review.stopReason = undefined;
-      child.review.endedAt = undefined;
-      await this.save(`resume child #${child.issue.number} review`);
-      await this.runQuality(child.review);
+      return;
     }
-    child.status = isDoneReview(child.review) ? "clean" : "blocked";
-    child.stopReason = child.review.stopReason;
-    await this.save(`child #${child.issue.number} ${child.status}`);
+    state.implemented = true;
+    await this.save("direct implementation complete");
   }
 
   private async openPrWithPi(
@@ -746,7 +733,6 @@ export class FeatureLoopConductor {
       status: "skipped",
       cwd,
       logPath: "",
-      promptPath: "",
       startedAt: new Date().toISOString(),
       endedAt: new Date().toISOString(),
       stopReason: reason,

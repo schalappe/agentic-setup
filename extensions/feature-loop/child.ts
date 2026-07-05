@@ -61,6 +61,8 @@ export function parseChildResult(text: string): ChildResult | undefined {
     for (const match of chunk.matchAll(RESULT_RE)) {
       try {
         const parsed = JSON.parse(match[1] ?? "") as ChildResult;
+        if (typeof parsed.status === "string")
+          parsed.status = parsed.status.toLowerCase() as ChildResult["status"];
         // [>]: Prompts echo the contract template; only real statuses count.
         if (RESULT_STATUSES.has(parsed.status)) last = parsed;
       } catch {
@@ -93,7 +95,11 @@ export function extractAssistantText(text: string): string {
   return last;
 }
 
-function appendTextTail(current: string, text: string, maxChars: number): string {
+function appendTextTail(
+  current: string,
+  text: string,
+  maxChars: number,
+): string {
   const next = current + text;
   return next.length > maxChars ? next.slice(-maxChars) : next;
 }
@@ -205,10 +211,13 @@ async function spawnPi(
   defaultTimeoutMs: number,
 ): Promise<PiSpawnResult> {
   await mkdir(path.join(input.runDir, "logs"), { recursive: true });
-  await mkdir(path.join(input.runDir, "prompts"), { recursive: true });
   const promptPath = path.join(input.runDir, "prompts", `${input.name}.md`);
   const logPath = path.join(input.runDir, "logs", `${input.name}.jsonl`);
-  await writeFile(promptPath, input.prompt, "utf8");
+  const prompt = promptArg(input.prompt, promptPath);
+  if (prompt !== input.prompt) {
+    await mkdir(path.dirname(promptPath), { recursive: true });
+    await writeFile(promptPath, input.prompt, "utf8");
+  }
 
   const worker: WorkerRef = {
     id: input.name,
@@ -216,20 +225,14 @@ async function spawnPi(
     status: "running",
     cwd: input.cwd,
     logPath,
-    promptPath,
+    promptPath: prompt === input.prompt ? undefined : promptPath,
     startedAt: new Date().toISOString(),
   };
 
   const collector = createPiOutputCollector();
   const output = await spawnLogged(
     "pi",
-    [
-      "--mode",
-      "json",
-      "--no-session",
-      "-p",
-      promptArg(input.prompt, promptPath),
-    ],
+    ["--mode", "json", "--no-session", "-p", prompt],
     {
       cwd: input.cwd,
       logPath,
@@ -285,13 +288,17 @@ async function resolveChildResult(
   const parsed =
     spawned.result ?? parseChildResult(`${output.stdout}\n${output.stderr}`);
   if (parsed) return parsed;
-  const recovered =
-    output.code === 0
-      ? await recoverResult(
-          input,
-          spawned.finalText || extractAssistantText(output.stdout),
-        )
-      : undefined;
+  if (output.code === 124)
+    return { status: "failed", stopReason: "child timed out" };
+  if (output.code !== 0)
+    return {
+      status: "failed",
+      stopReason: `child exited ${output.code}: ${outputTail(output)}`,
+    };
+  const recovered = await recoverResult(
+    input,
+    spawned.finalText || extractAssistantText(output.stdout),
+  );
   return (
     recovered ?? {
       status: "blocked",
@@ -300,8 +307,14 @@ async function resolveChildResult(
   );
 }
 
+function outputTail(output: SpawnLogResult): string {
+  return (
+    (output.stderr.trim() || output.stdout.trim()).slice(-200) || "no output"
+  );
+}
+
 /**
- * One retry: worker finished without contract line -> ask a fresh child to
+ * Retries: worker finished without contract line -> ask a fresh child to
  * grade its final message instead of blocking the whole run.
  */
 async function recoverResult(
@@ -309,20 +322,23 @@ async function recoverResult(
   finalMessage: string,
 ): Promise<ChildResult | undefined> {
   if (!finalMessage.trim()) return undefined;
-  const spawned = await spawnPi(
-    {
-      ...input,
-      name: `${input.name}-result`,
-      prompt: resultRecoveryPrompt(finalMessage),
-      timeoutMs: RECOVERY_TIMEOUT_MS,
-    },
-    RECOVERY_TIMEOUT_MS,
-  );
-  if (spawned.output.code !== 0) return undefined;
-  return (
-    spawned.result ??
-    parseChildResult(`${spawned.output.stdout}\n${spawned.output.stderr}`)
-  );
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const spawned = await spawnPi(
+      {
+        ...input,
+        name: `${input.name}-result-${attempt}`,
+        prompt: resultRecoveryPrompt(finalMessage),
+        timeoutMs: RECOVERY_TIMEOUT_MS,
+      },
+      RECOVERY_TIMEOUT_MS,
+    );
+    if (spawned.output.code !== 0) continue;
+    const result =
+      spawned.result ??
+      parseChildResult(`${spawned.output.stdout}\n${spawned.output.stderr}`);
+    if (result) return result;
+  }
+  return undefined;
 }
 
 /**

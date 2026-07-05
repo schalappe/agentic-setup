@@ -15,7 +15,7 @@ export const FEATURE_LOOP_DIR = path.join(".pi", "feature-loop");
  * @returns Absolute root path.
  */
 export function featureLoopRoot(cwd: string): string {
-	return path.join(cwd, FEATURE_LOOP_DIR);
+  return path.join(cwd, FEATURE_LOOP_DIR);
 }
 
 /**
@@ -25,7 +25,7 @@ export function featureLoopRoot(cwd: string): string {
  * @returns Absolute run dir.
  */
 export function runDir(cwd: string, issueNumber: number): string {
-	return path.join(featureLoopRoot(cwd), `run-${issueNumber}`);
+  return path.join(featureLoopRoot(cwd), `run-${issueNumber}`);
 }
 
 /**
@@ -33,12 +33,11 @@ export function runDir(cwd: string, issueNumber: number): string {
  * @param dir - Run dir.
  */
 export async function ensureRunDirs(dir: string): Promise<void> {
-	await Promise.all([
-		mkdir(path.join(dir, "logs"), { recursive: true }),
-		mkdir(path.join(dir, "prompts"), { recursive: true }),
-		mkdir(path.join(dir, "artifacts"), { recursive: true }),
-		mkdir(path.join(dir, "worktrees"), { recursive: true }),
-	]);
+  await Promise.all([
+    mkdir(path.join(dir, "logs"), { recursive: true }),
+    mkdir(path.join(dir, "artifacts"), { recursive: true }),
+    mkdir(path.join(dir, "worktrees"), { recursive: true }),
+  ]);
 }
 
 /**
@@ -47,12 +46,12 @@ export async function ensureRunDirs(dir: string): Promise<void> {
  * @returns Lowercase slug.
  */
 export function slugify(text: string): string {
-	const slug = text
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 48);
-	return slug || "issue";
+  const slug = text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return slug || "issue";
 }
 
 /**
@@ -60,7 +59,7 @@ export function slugify(text: string): string {
  * @returns Short branch-safe id.
  */
 export function newRunId(): string {
-	return randomUUID().slice(0, 8);
+  return randomUUID().slice(0, 8);
 }
 
 /**
@@ -71,6 +70,11 @@ export function newRunId(): string {
  * @param runId - Run suffix.
  * @returns Branch name.
  */
-export function runBranch(prefix: "feature" | "child", issueNumber: number, title: string, runId: string): string {
-	return `${prefix}/${issueNumber}-${slugify(title)}-${runId}`;
+export function runBranch(
+  prefix: "feature" | "child",
+  issueNumber: number,
+  title: string,
+  runId: string,
+): string {
+  return `${prefix}/${issueNumber}-${slugify(title)}-${runId}`;
 }

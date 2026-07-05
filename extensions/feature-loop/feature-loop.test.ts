@@ -45,6 +45,14 @@ test("parse child result tolerates markdown wrapping", () => {
   ).toEqual({ status: "clean", findingCount: 0 });
 });
 
+test("parse child result normalizes status case", () => {
+  expect(
+    parseChildResult(
+      'FEATURE_LOOP_RESULT: {"status":"Fixed","findingCount":0}',
+    ),
+  ).toEqual({ status: "fixed", findingCount: 0 });
+});
+
 test("parse child result returns undefined when sentinel missing", () => {
   expect(
     parseChildResult(
@@ -243,10 +251,19 @@ test("parse clean args", () => {
 test("clean removes unpushed worktree without deleting branch", async () => {
   const dir = await mkdtemp(join(tmpdir(), "feature-loop-clean-"));
   const repo = join(dir, "repo");
-  const worktree = join(repo, ".pi", "feature-loop", "run-9", "worktrees", "feature-9");
+  const worktree = join(
+    repo,
+    ".pi",
+    "feature-loop",
+    "run-9",
+    "worktrees",
+    "feature-9",
+  );
   const run = runDir(repo, 9);
   await execFile("git", ["init", repo], { cwd: dir });
-  await execFile("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  await execFile("git", ["config", "user.email", "test@example.com"], {
+    cwd: repo,
+  });
   await execFile("git", ["config", "user.name", "Test"], { cwd: repo });
   await writeFile(join(repo, "README.md"), "x\n", "utf8");
   await execFile("git", ["add", "README.md"], { cwd: repo });

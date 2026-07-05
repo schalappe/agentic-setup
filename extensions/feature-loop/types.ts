@@ -37,7 +37,8 @@ export interface WorkerRef {
   status: StepStatus;
   cwd: string;
   logPath: string;
-  promptPath: string;
+  /** Set only when the prompt was too big for argv and went through @file. */
+  promptPath?: string;
   startedAt: string;
   endedAt?: string;
   exitCode?: number;
@@ -101,6 +102,8 @@ export interface FeatureLoopState {
   runDir: string;
   status: RunStatus;
   mode: "children" | "direct";
+  /** Direct-mode implementation finished; resume must not redo it. */
+  implemented?: boolean;
   /** Optional for state files written before this field existed. */
   maxCycles?: number;
   children: ChildRun[];

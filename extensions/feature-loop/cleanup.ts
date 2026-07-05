@@ -74,7 +74,7 @@ export async function cleanRuns(
     const ok = await ctx.ui.confirm(
       `Delete ${path.basename(dir)}?`,
       state
-        ? `Removes logs, artifacts, prompts, state, and worktrees under ${dir}. Branches/PRs stay untouched.`
+        ? `Removes logs, artifacts, state, and worktrees under ${dir}. Branches/PRs stay untouched.`
         : `State unreadable. Removes ${dir} only; clean any worktrees manually.`,
     );
     if (!ok) continue;
@@ -86,7 +86,10 @@ export async function cleanRuns(
     ctx.ui.notify(`Deleted ${dir}`, "info");
   }
   if (deleted === 0 && refused > 0)
-    ctx.ui.notify("No runs deleted; rerun with --force to discard dirty worktrees", "warning");
+    ctx.ui.notify(
+      "No runs deleted; rerun with --force to discard dirty worktrees",
+      "warning",
+    );
 }
 
 async function targetRunDirs(

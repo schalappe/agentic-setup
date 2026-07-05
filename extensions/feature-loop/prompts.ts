@@ -10,6 +10,8 @@ import type { GitHubIssue } from "./types.ts";
 const resultContract = `
 End final response with exactly one line:
 FEATURE_LOOP_RESULT: {"status":"clean|findings|fixed|blocked|failed","findingCount":0,"summary":"short","stopReason":"short or null"}
+This line is machine-parsed; omitting it blocks the whole run. Always emit it,
+even when there is nothing to do or the work was already done.
 `;
 
 /**
@@ -35,6 +37,8 @@ Required flow:
 6. Commit using caveman-commit rules.
 7. Push the current branch.
 
+This may be a resumed run: if the branch already implements the issue, skip to
+verification, push, and report status fixed with summary "already implemented".
 Stop and report blocked if requirements are ambiguous, destructive, or need human taste.
 ${resultContract}`;
 }
